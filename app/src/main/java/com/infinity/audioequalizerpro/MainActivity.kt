@@ -52,12 +52,39 @@ class MainActivity : ComponentActivity() {
             var nativeGains by remember(nativeBandCount) {
                 mutableStateOf(nativeFrequencies.map { prefs.getFloat("native_band_${nativeBandCount}_$it", 0f) })
             }
+            var androidMultiBand by remember { mutableStateOf(prefs.getBoolean("android_multiband_enabled", false)) }
+            var androidBandCount by remember { mutableIntStateOf(prefs.getInt("android_band_count", 10).takeIf { it in listOf(10, 15, 31) } ?: 10) }
+            val androidFrequencies = remember(androidBandCount) { NativeGraphicEq.frequencies(androidBandCount) }
+            var androidMultiGains by remember(androidBandCount) {
+                mutableStateOf(androidFrequencies.map { prefs.getFloat("android_multi_band_${androidBandCount}_$it", 0f) })
+            }
             val isNative = engineMode == EngineMode.NATIVE
-            val displayFrequencies = if (isNative) nativeFrequencies else engine.frequencies
-            var connected by remember { mutableStateOf(false) }
-            var tracking by remember { mutableStateOf(prefs.getBoolean("external_tracking_requested", false)) }
+            val useMultiBand = isNative || androidMultiBand
+            val displayFrequencies = if (isNative) nativeFrequencies else if (androidMultiBand) androidFrequencies else engine.frequencies
             var gains by remember { mutableStateOf(emptyList<Float>()) }
-            val displayGains = if (isNative) nativeGains else gains
+            val displayGains = if (isNative) nativeGains else if (androidMultiBand) androidMultiGains else gains
+            var connected by remember { mutableStateOf(false) }
+            var globalMultiBand by remember { mutableStateOf<ExternalMultiBandEq?>(null) }
+            var multiBandStatus by remember { mutableStateOf("연결 시도 전") }
+            fun updateGlobalMultiBand() {
+                globalMultiBand?.release()
+                globalMultiBand = null
+                if (!useMultiBand || prefs.getBoolean("global_mix_enabled", false)) {
+                    multiBandStatus = if (useMultiBand) "글로벌 믹스: 백그라운드 서비스 관리" else "기본 Equalizer 사용"
+                    return
+                }
+                try {
+                    val count = if (isNative) nativeBandCount else androidBandCount
+                    val effect = ExternalMultiBandEq(0, count)
+                    val levels = if (isNative) nativeGains else androidMultiGains
+                    effect.apply(levels, prefs.getBoolean("external_eq_enabled", true))
+                    globalMultiBand = effect
+                    multiBandStatus = "세션 0 · ${count}밴드 효과 설정 전달 (실제 출력 적용 미확인)"
+                } catch (e: Exception) {
+                    multiBandStatus = "다중 밴드 연결 실패: ${e.message}"
+                }
+            }
+            var tracking by remember { mutableStateOf(prefs.getBoolean("external_tracking_requested", false)) }
             var avoidEnabled by remember { mutableStateOf(prefs.getBoolean("avoid_enabled", false)) }
             var avoidFreq by remember { mutableFloatStateOf(prefs.getFloat("avoid_freq", 10000f)) }
             var avoidStartText by remember { mutableStateOf(prefs.getInt("avoid_start_hz", 8000).toString()) }
@@ -117,18 +144,23 @@ class MainActivity : ComponentActivity() {
                     baseGains = engine.levels()
                     applyPreference(baseGains)
                     engine.setBass(bass); engine.setSpatial(space); engine.setLoudness(loud)
-                    engine.setEnabled(on)
+                    engine.setEnabled(on && !useMultiBand)
                     notice = "세션 $id 연결됨 · 실제 재생 앱 적용 여부는 기기에서 확인하세요."
                 } else notice = engine.error ?: "연결 실패"
             }
             LaunchedEffect(Unit) { connect() }
+            DisposableEffect(Unit) { onDispose { globalMultiBand?.release() } }
+            LaunchedEffect(isNative, androidMultiBand, androidBandCount, nativeBandCount, on) {
+                if (useMultiBand) engine.setEnabled(false) else engine.setEnabled(on)
+                updateGlobalMultiBand()
+            }
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Bg, surface = Panel, onSurface = Ink)) {
                 Scaffold(containerColor = Bg, topBar = {
                     Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.GraphicEq, null, tint = Accent)
                         Spacer(Modifier.width(10.dp))
                         Text("Infinity Audio Equalizer Pro", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.weight(1f))
-                        Switch(checked = on, onCheckedChange = { on = it; engine.setEnabled(it); prefs.edit().putBoolean("external_eq_enabled", it).apply(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH")) })
+                        Switch(checked = on, onCheckedChange = { on = it; engine.setEnabled(it && !useMultiBand); prefs.edit().putBoolean("external_eq_enabled", it).apply(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH")) })
                     }
                 }, bottomBar = {
                     NavigationBar(containerColor = Panel) {
@@ -141,19 +173,34 @@ class MainActivity : ComponentActivity() {
                         item { InfoCard(notice, if (connected) "DSP 연결됨" else "DSP 연결 안 됨") }
                         when (page) {
                             0 -> {
-                                item { Section("현재 오디오 엔진") { Text(if (isNative) "Infinity Native · ${nativeBandCount}밴드 (외부 세션 DynamicsProcessing 실험)" else "Android AudioEffect · ${engine.frequencies.size}밴드", color = Ink); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
+                                item { Section("현재 오디오 엔진") { Text(if (useMultiBand) "${if (isNative) "자체" else "기본"} DSP · ${displayFrequencies.size}밴드 (DynamicsProcessing 실험)" else "기본 DSP · ${engine.frequencies.size}밴드", color = Ink); Text(multiBandStatus, color = Color.LightGray, fontSize = 12.sp); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
                                 item { Section("EQ 응답 미리보기") { EqGraph(displayFrequencies, displayGains); Text("시각화는 밴드 레벨 보간이며 실제 측정된 주파수 응답이 아닙니다.", fontSize = 11.sp, color = Color.Gray) } }
                                 item { Section("빠른 이동") { Button(onClick = { page = 1 }, modifier = Modifier.fillMaxWidth()) { Text("그래픽 이퀄라이저 열기") }; OutlinedButton(onClick = { page = 4 }, modifier = Modifier.fillMaxWidth()) { Text("오디오 세션 연결 설정") } } }
                             }
                             1 -> {
                                 item { Section("그래픽 이퀄라이저") {
-                                    Text(if (isNative) "외부 앱: ${nativeBandCount}밴드 시스템 DSP 실험 · 기기 호환성 확인 필요" else "기기에서 지원하는 실제 밴드: ${engine.frequencies.size}개", color = Ink)
-                                    if (isNative) {
+                                    Text(if (useMultiBand) "다중 밴드 ${displayFrequencies.size}개 · 외부 앱 적용 여부 확인 필요" else "기기 기본 EQ ${engine.frequencies.size}밴드", color = Ink)
+                                    if (!isNative) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("기본 DSP 다중 밴드 실험", color = Ink, modifier = Modifier.weight(1f))
+                                            Switch(checked = androidMultiBand, onCheckedChange = {
+                                                androidMultiBand = it
+                                                prefs.edit().putBoolean("android_multiband_enabled", it).apply()
+                                                if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                            })
+                                        }
+                                    }
+                                    if (useMultiBand) {
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             listOf(10, 15, 31).forEach { count ->
-                                                FilterChip(selected = nativeBandCount == count, onClick = {
-                                                    nativeBandCount = count
-                                                    prefs.edit().putInt("native_band_count", count).apply()
+                                                FilterChip(selected = (if (isNative) nativeBandCount else androidBandCount) == count, onClick = {
+                                                    if (isNative) {
+                                                        nativeBandCount = count
+                                                        prefs.edit().putInt("native_band_count", count).apply()
+                                                    } else {
+                                                        androidBandCount = count
+                                                        prefs.edit().putInt("android_band_count", count).apply()
+                                                    }
                                                     if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                                 }, label = { Text("${count}밴드") })
                                             }
@@ -169,13 +216,19 @@ class MainActivity : ComponentActivity() {
                                                 if (isNative) {
                                                     nativeGains = nativeGains.toMutableList().apply { this[i] = v }
                                                     prefs.edit().putFloat("native_band_${nativeBandCount}_$hz", v).apply()
+                                                    updateGlobalMultiBand()
+                                                    if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                                } else if (androidMultiBand) {
+                                                    androidMultiGains = androidMultiGains.toMutableList().apply { this[i] = v }
+                                                    prefs.edit().putFloat("android_multi_band_${androidBandCount}_$hz", v).apply()
+                                                    updateGlobalMultiBand()
                                                     if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                                 } else {
                                                     baseGains = baseGains.toMutableList().apply { this[i] = v }
                                                     applyPreference(baseGains)
                                                     prefs.edit().putFloat("band_$hz", v).apply()
                                                 }
-                                            }, valueRange = if (isNative) -12f..12f else engine.gainRange, enabled = on && (isNative || connected), modifier = Modifier.weight(1f))
+                                            }, valueRange = if (useMultiBand) -12f..12f else engine.gainRange, enabled = on && (useMultiBand || connected), modifier = Modifier.weight(1f))
                                             Text("%+.1f dB".format(value), color = Ink, modifier = Modifier.width(88.dp), textAlign = TextAlign.End)
                                         }
                                     }
@@ -186,12 +239,19 @@ class MainActivity : ComponentActivity() {
                                         val editor = prefs.edit()
                                         nativeFrequencies.forEach { editor.putFloat("native_band_${nativeBandCount}_$it", 0f) }
                                         editor.apply()
+                                        updateGlobalMultiBand()
+                                    } else if (androidMultiBand) {
+                                        androidMultiGains = List(androidBandCount) { 0f }
+                                        val editor = prefs.edit()
+                                        androidFrequencies.forEach { editor.putFloat("android_multi_band_${androidBandCount}_$it", 0f) }
+                                        editor.apply()
+                                        updateGlobalMultiBand()
                                     } else {
                                         baseGains = List(engine.frequencies.size) { 0f }
                                         baseGains.indices.forEach { prefs.edit().putFloat("band_${engine.frequencies[it]}", 0f).apply() }
                                         applyPreference(baseGains)
                                     }
-                                }, modifier = Modifier.fillMaxWidth(), enabled = isNative || connected) { Text("EQ 초기화") } }
+                                }, modifier = Modifier.fillMaxWidth(), enabled = useMultiBand || connected) { Text("EQ 초기화") } }
                             }
                             2 -> {
                                 item { Section("비선호 주파수 자연 감쇠") {
@@ -298,7 +358,7 @@ class MainActivity : ComponentActivity() {
                                             Text(mode.title, color = Ink)
                                         }
                                     }
-                                    Text(if (engineMode == EngineMode.NATIVE) "외부 앱 세션에 DynamicsProcessing 다중밴드 EQ를 연결합니다. C++ 자체 DSP와 다른 시스템 효과이며 기기 지원 여부에 따라 실패할 수 있습니다. 멜론 재생 중 31밴드 고음을 -12dB로 내려 검증하세요." else "Android AudioEffect는 지원되는 오디오 세션에만 연결됩니다.", color = Color.LightGray, fontSize = 12.sp)
+                                    Text("두 모드 모두 10·15·31밴드를 선택할 수 있습니다. 외부 앱 다중 밴드는 Android DynamicsProcessing 실험이며 C++ DSP 직접 삽입이 아닙니다. 기본 DSP 다중 밴드를 끄면 기존 기기 EQ로 복귀합니다.", color = Color.LightGray, fontSize = 12.sp)
                                 } }
                                 item { Section("성능 및 지연 설정") {
                                     PerformanceMode.entries.forEach { mode ->
@@ -332,6 +392,26 @@ class MainActivity : ComponentActivity() {
                                     Text("자체 DSP: 현재는 앱 내부 테스트 PCM에만 적용됩니다. 다른 앱 오디오를 임의로 가로채거나 재출력하지 않습니다.", color = Color.LightGray, fontSize = 12.sp)
                                     Text("브라우저·동영상·스트리밍 앱의 DRM, 오프로드, 독점 출력 경로는 기기별로 적용되지 않을 수 있습니다.", color = Color.LightGray, fontSize = 12.sp)
                                 } }
+                                item { Section("글로벌 믹스 EQ · 실험적") {
+                                    var globalMix by remember { mutableStateOf(prefs.getBoolean("global_mix_enabled", false)) }
+                                    var globalStatus by remember { mutableStateOf(prefs.getString("global_mix_status", "미시도") ?: "미시도") }
+                                    Text("세션 0에 다중 밴드 효과를 연결합니다. 실제 음악 출력 적용은 기기마다 다릅니다.", color = Color.LightGray, fontSize = 12.sp)
+                                    Switch(checked = globalMix, onCheckedChange = { enabled ->
+                                        globalMix = enabled
+                                        prefs.edit().putBoolean("global_mix_enabled", enabled).apply()
+                                        updateGlobalMultiBand()
+                                        if (enabled && !tracking) {
+                                            tracking = true
+                                            prefs.edit().putBoolean("external_tracking_requested", true).apply()
+                                            ContextCompat.startForegroundService(this@MainActivity, Intent(this@MainActivity, ExternalAudioService::class.java))
+                                        } else if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                    })
+                                    Text("상태: $globalStatus", color = Ink, fontSize = 12.sp)
+                                    OutlinedButton(onClick = {
+                                        if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                        globalStatus = prefs.getString("global_mix_status", "미시도") ?: "미시도"
+                                    }) { Text("글로벌 상태 새로고침") }
+                                } }
                                 item { Section("외부 앱 EQ · 자동 세션 추적 (실험적)") {
                                     Text("멜론·YouTube·Spotify 등에서 공개 오디오 효과 세션 이벤트가 전달되면 세션별 Android EQ를 연결합니다. 이벤트를 보내지 않는 앱, 오프로드 및 일부 블루투스 경로는 적용되지 않을 수 있습니다.", color = Color.LightGray, fontSize = 12.sp)
                                     Switch(checked = tracking, onCheckedChange = { enabled ->
@@ -341,8 +421,19 @@ class MainActivity : ComponentActivity() {
                                         if (enabled) ContextCompat.startForegroundService(this@MainActivity, intent)
                                         else stopService(intent)
                                     })
+                                    var sessionDiagnostic by remember { mutableStateOf(prefs.getString("detected_audio_apps", "아직 감지 정보 없음") ?: "") }
+                                    var sessionStatus by remember { mutableStateOf(prefs.getString("multiband_status", "상태 정보 없음") ?: "") }
+                                    Text("감지된 외부 오디오 앱 / 연결 세션", color = Ink)
+                                    Text(sessionDiagnostic, color = Color.LightGray, fontSize = 12.sp)
+                                    Text("다중 밴드 DSP: $sessionStatus", color = Color.LightGray, fontSize = 12.sp)
                                     Text("최근 감지 세션: ${prefs.getInt("last_detected_session", -1)} · ${prefs.getString("last_session_error", "")}", color = Ink)
-                                    Button(onClick = { notice = "최근 감지 세션: ${prefs.getInt("last_detected_session", -1)} / ${prefs.getString("last_session_error", "오류 없음")}" }) { Text("진단 정보 새로고침") }
+                                    Text("글로벌 다중 밴드: $multiBandStatus", color = Ink, fontSize = 12.sp)
+                                    Button(onClick = {
+                                        sessionDiagnostic = prefs.getString("detected_audio_apps", "감지된 정보 없음") ?: ""
+                                        sessionStatus = prefs.getString("multiband_status", "상태 정보 없음") ?: ""
+                                        notice = "오디오 앱/세션 진단 정보를 새로고침했습니다."
+                                    }) { Text("감지 앱 및 DSP 상태 새로고침") }
+                                    Text("감지/설정 전달 성공은 실제 음향 적용의 증거가 아닙니다.", color = Color.Gray, fontSize = 11.sp)
                                     Text("세션 감지는 실제 음질 변화의 증거가 아닙니다. 음악 재생 중 EQ ±6dB 비교로 직접 확인하세요. 서비스는 알림을 표시하며 앱에서 끌 수 있습니다.", color = Color.Gray, fontSize = 11.sp)
                                 } }
                                 item { Section("오디오 세션 연결") { OutlinedTextField(value = session, onValueChange = { session = it.filter(Char::isDigit) }, label = { Text("Audio Session ID (0 = 레거시 믹스)") }, singleLine = true, modifier = Modifier.fillMaxWidth()); Button(onClick = { connect() }, modifier = Modifier.fillMaxWidth()) { Text("연결 / 재연결") } } }
