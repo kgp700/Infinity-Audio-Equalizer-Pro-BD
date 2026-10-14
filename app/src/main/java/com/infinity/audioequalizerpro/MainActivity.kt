@@ -373,7 +373,13 @@ class MainActivity : ComponentActivity() {
                                 item { Section("프리셋 저장") { OutlinedTextField(value = presetName, onValueChange = { presetName = it }, label = { Text("프리셋 이름") }, singleLine = true, modifier = Modifier.fillMaxWidth()); Button(onClick = {
                                     val name = presetName.trim().replace("|", "_")
                                     if (name.isNotBlank()) {
-                                        val obj = JSONObject().put("freq", engine.frequencies.joinToString(",")).put("levels", baseGains.joinToString(",")).put("bass", bass.toDouble()).put("space", space.toDouble()).put("loud", loud.toDouble())
+                                        val savedFreq = displayFrequencies
+                                        val savedLevels = displayGains
+                                        val savedMode = if (isNative) "NATIVE" else "ANDROID"
+                                        val savedMulti = useMultiBand
+                                        val obj = JSONObject().put("freq", savedFreq.joinToString(",")).put("levels", savedLevels.joinToString(","))
+                                            .put("engineMode", savedMode).put("multiBand", savedMulti).put("bandCount", savedFreq.size)
+                                            .put("bass", bass.toDouble()).put("space", space.toDouble()).put("loud", loud.toDouble())
                                         prefs.edit().putString("preset_$name", obj.toString()).apply()
                                         if (name !in presetKeys) { presetKeys.add(name); prefs.edit().putString("preset_names", presetKeys.joinToString("|")).apply() }
                                         notice = "프리셋 '$name' 저장 완료"
@@ -387,7 +393,36 @@ class MainActivity : ComponentActivity() {
                                                     val obj = JSONObject(prefs.getString("preset_$name", "{}")!!)
                                                     val fs = obj.optString("freq").split(",").mapNotNull { it.toIntOrNull() }
                                                     val vs = obj.optString("levels").split(",").mapNotNull { it.toFloatOrNull() }
-                                                    baseGains = engine.frequencies.map { f -> fs.indexOf(f).let { idx -> if (idx >= 0 && idx < vs.size) vs[idx] else 0f } }; applyPreference(baseGains)
+                                                    val savedMode = obj.optString("engineMode", "ANDROID")
+                                                    val savedMulti = obj.optBoolean("multiBand", false)
+                                                    val savedCount = obj.optInt("bandCount", fs.size)
+                                                    if (savedMulti && savedCount in listOf(10, 15, 31)) {
+                                                        val targetNative = savedMode == "NATIVE"
+                                                        engineMode = if (targetNative) EngineMode.NATIVE else EngineMode.ANDROID
+                                                        if (targetNative) nativeBandCount = savedCount else { androidMultiBand = true; androidBandCount = savedCount }
+                                                        val targetFreq = NativeGraphicEq.frequencies(savedCount)
+                                                        val restored = targetFreq.map { f -> fs.indexOf(f).let { idx -> if (idx in vs.indices) vs[idx] else 0f } }
+                                                        if (targetNative) nativeGains = restored else androidMultiGains = restored
+                                                        val prefix = if (targetNative) "native_band" else "android_multi_band"
+                                                        val editor = prefs.edit().putString("engine_mode", engineMode.name)
+                                                            .putBoolean("android_multiband_enabled", !targetNative)
+                                                            .putInt(if (targetNative) "native_band_count" else "android_band_count", savedCount)
+                                                        targetFreq.forEachIndexed { idx, f -> editor.putFloat("${prefix}_${savedCount}_$f", restored[idx]) }
+                                                        editor.apply()
+                                                        engine.setEnabled(false)
+                                                        updateGlobalMultiBand()
+                                                    } else {
+                                                        engineMode = EngineMode.ANDROID
+                                                        androidMultiBand = false
+                                                        prefs.edit().putString("engine_mode", "ANDROID").putBoolean("android_multiband_enabled", false).apply()
+                                                        baseGains = engine.frequencies.map { f -> fs.indexOf(f).let { idx -> if (idx in vs.indices) vs[idx] else 0f } }
+                                                        val editor = prefs.edit()
+                                                        engine.frequencies.forEachIndexed { idx, f -> editor.putFloat("band_$f", baseGains[idx]) }
+                                                        editor.apply()
+                                                        applyPreference(baseGains)
+                                                        engine.setEnabled(on)
+                                                    }
+                                                    if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                                      bass = obj.optDouble("bass", 0.0).toFloat(); space = obj.optDouble("space", 0.0).toFloat(); loud = obj.optDouble("loud", 0.0).toFloat()
                                                     engine.setBass(bass); engine.setSpatial(space); engine.setLoudness(loud)
                                                     prefs.edit().putFloat("bass", bass).putFloat("space", space).putFloat("loud", loud).apply()

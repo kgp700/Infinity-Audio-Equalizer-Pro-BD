@@ -15,8 +15,17 @@ enum class PerformanceMode(val title: String, val frames: Int, val fade: Int) {
 object NativeGraphicEq {
     fun frequencies(count: Int): List<Int> {
         require(count in listOf(10, 15, 31))
+        if (count == 15) return listOf(
+            25, 40, 63, 100, 160, 250, 400, 630,
+            1000, 1600, 2500, 4000, 6400, 10000, 16000
+        )
+        if (count == 31) return listOf(
+            16, 20, 26, 32, 41, 52, 66, 84, 105, 135, 170,
+            220, 280, 350, 440, 560, 720, 910, 1200, 1500,
+            1900, 2300, 3000, 3800, 4800, 6100, 7700,
+            10000, 12500, 16000, 20000
+        )
         return (0 until count).map { i ->
-            // Logarithmically spaced between 20Hz and 20kHz.
             (20.0 * (1000.0).pow(i.toDouble() / (count - 1))).roundToInt()
         }
     }
