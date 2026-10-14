@@ -44,7 +44,7 @@ class AudioEngine {
     fun setLoudness(db: Float) { try { loudness?.setTargetGain((db.coerceIn(0f, 12f) * 100).toInt()); loudness?.enabled = enabled && db > 0f } catch (e: Exception) { error = e.message } }
     fun setEnabled(on: Boolean) {
         enabled = on
-        try { eq?.enabled = on; bass?.enabled = on && (bass?.roundedStrength ?: 0) > 0; virtualizer?.enabled = on && (virtualizer?.roundedStrength ?: 0) > 0; loudness?.enabled = on && (loudness?.targetGain ?: 0) > 0 }
+        try { eq?.enabled = on; bass?.enabled = on && (bass?.roundedStrength ?: 0) > 0; virtualizer?.enabled = on && (virtualizer?.roundedStrength ?: 0) > 0; loudness?.enabled = on && (loudness?.targetGain ?: 0f) > 0f }
         catch (e: Exception) { error = e.message }
     }
     fun release() {
