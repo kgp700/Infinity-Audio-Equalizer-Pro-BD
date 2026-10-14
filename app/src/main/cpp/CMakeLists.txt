@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(infinitydsp LANGUAGES CXX)
+add_library(infinitydsp SHARED infinity_dsp.cpp)
+target_compile_features(infinitydsp PRIVATE cxx_std_17)
+target_compile_options(infinitydsp PRIVATE -O3 -fno-fast-math)
+target_link_libraries(infinitydsp log)
