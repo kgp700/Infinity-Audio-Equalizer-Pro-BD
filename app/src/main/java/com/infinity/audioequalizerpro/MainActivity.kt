@@ -1,6 +1,8 @@
 package com.infinity.audioequalizerpro
 
 import android.os.Bundle
+import android.media.audiofx.Virtualizer
+import android.media.AudioFormat
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
@@ -66,21 +68,26 @@ class MainActivity : ComponentActivity() {
             var connected by remember { mutableStateOf(false) }
             var globalMultiBand by remember { mutableStateOf<ExternalMultiBandEq?>(null) }
             var multiBandStatus by remember { mutableStateOf("연결 시도 전") }
+            var appliedBandCount by remember { mutableIntStateOf(0) }
             fun updateGlobalMultiBand() {
-                globalMultiBand?.release()
-                globalMultiBand = null
                 if (!useMultiBand || prefs.getBoolean("global_mix_enabled", false)) {
-                    multiBandStatus = if (useMultiBand) "글로벌 믹스: 백그라운드 서비스 관리" else "기본 Equalizer 사용"
+                    globalMultiBand?.release(); globalMultiBand = null; appliedBandCount = 0
+                    multiBandStatus = if (useMultiBand) "글로벌 믹스: 서비스에서 관리" else "기본 Equalizer 사용"
                     return
                 }
                 try {
                     val count = if (isNative) nativeBandCount else androidBandCount
-                    val effect = ExternalMultiBandEq(0, count)
+                    if (globalMultiBand == null || appliedBandCount != count) {
+                        globalMultiBand?.release()
+                        globalMultiBand = ExternalMultiBandEq(0, count)
+                        appliedBandCount = count
+                    }
                     val levels = if (isNative) nativeGains else androidMultiGains
-                    effect.apply(levels, prefs.getBoolean("external_eq_enabled", true))
-                    globalMultiBand = effect
-                    multiBandStatus = "세션 0 · ${count}밴드 효과 설정 전달 (실제 출력 적용 미확인)"
+                    globalMultiBand!!.apply(levels, prefs.getBoolean("external_eq_enabled", true),
+                        prefs.getBoolean("eq_envelope", false), prefs.getBoolean("eq_headroom", true))
+                    multiBandStatus = "세션 0 · ${count}밴드 설정 적용 요청 (실제 출력은 청음 확인)"
                 } catch (e: Exception) {
+                    globalMultiBand?.release(); globalMultiBand = null; appliedBandCount = 0
                     multiBandStatus = "다중 밴드 연결 실패: ${e.message}"
                 }
             }
@@ -124,11 +131,40 @@ class MainActivity : ComponentActivity() {
                 applyPreference(baseGains)
             }
             var previewRunning by remember { mutableStateOf(false) }
-            var on by remember { mutableStateOf(true) }
             var session by remember { mutableStateOf("0") }
             var bass by remember { mutableFloatStateOf(0f) }
             var space by remember { mutableFloatStateOf(0f) }
             var nativeWidth by remember { mutableFloatStateOf(prefs.getFloat("native_width", 0f)) }
+            var on by remember { mutableStateOf(true) }
+            var spatialEffect by remember { mutableStateOf<Virtualizer?>(null) }
+            var spatialAvailable by remember { mutableStateOf(false) }
+            var spatialStatus by remember { mutableStateOf("지원 확인 중") }
+            var spatialStrength by remember { mutableFloatStateOf(prefs.getFloat("spatial_strength", 0f)) }
+            fun applyExternalSpatial() {
+                try {
+                    if (spatialEffect == null) {
+                        @Suppress("DEPRECATION")
+                        val v = Virtualizer(0, 0)
+                        @Suppress("DEPRECATION")
+                        val supported = v.canVirtualize(AudioFormat.CHANNEL_OUT_STEREO, Virtualizer.VIRTUALIZATION_MODE_BINAURAL)
+                        if (!supported) {
+                            v.release(); spatialAvailable = false
+                            spatialStatus = "기기에서 헤드폰 가상화 지원 확인 실패 · 외부 앱 옵션 비활성"
+                            return
+                        }
+                        spatialEffect = v
+                    }
+                    spatialAvailable = true
+                    @Suppress("DEPRECATION")
+                    spatialEffect!!.setStrength((spatialStrength.coerceIn(0f, 1f) * 1000f).toInt().toShort())
+                    spatialEffect!!.enabled = on && spatialStrength > 0f
+                    spatialStatus = "Android Virtualizer 세션 0 설정됨 · 멜론 적용은 청음 확인 필요"
+                } catch (e: Exception) {
+                    spatialEffect?.release(); spatialEffect = null; spatialAvailable = false
+                    spatialStatus = "기기 효과 사용 불가: ${e.message}"
+                }
+            }
+
             var dolbyReport by remember { mutableStateOf("확인 버튼을 눌러 기기 공개 효과 목록을 조회하세요.") }
             var loud by remember { mutableFloatStateOf(0f) }
             var notice by remember { mutableStateOf("기본 설정은 세션 0입니다. 모든 앱에 적용되지는 않습니다.") }
@@ -149,7 +185,8 @@ class MainActivity : ComponentActivity() {
                 } else notice = engine.error ?: "연결 실패"
             }
             LaunchedEffect(Unit) { connect() }
-            DisposableEffect(Unit) { onDispose { globalMultiBand?.release() } }
+            DisposableEffect(Unit) { onDispose { globalMultiBand?.release(); spatialEffect?.release() } }
+            LaunchedEffect(on) { applyExternalSpatial() }
             LaunchedEffect(isNative, androidMultiBand, androidBandCount, nativeBandCount, on) {
                 if (useMultiBand) engine.setEnabled(false) else engine.setEnabled(on)
                 updateGlobalMultiBand()
@@ -207,6 +244,29 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                     EqGraph(displayFrequencies, displayGains)
+                                    if (useMultiBand) {
+                                        var envelope by remember { mutableStateOf(prefs.getBoolean("eq_envelope", false)) }
+                                        var headroom by remember { mutableStateOf(prefs.getBoolean("eq_headroom", true)) }
+                                        Text("밴드 오버랩 · Android 효과의 정확한 필터 구조는 기기에 따라 다름", color = Color.LightGray, fontSize = 12.sp)
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            FilterChip(selected = !envelope, onClick = {
+                                                envelope = false; prefs.edit().putBoolean("eq_envelope", false).apply()
+                                                updateGlobalMultiBand(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                            }, label = { Text("캐스케이드") })
+                                            FilterChip(selected = envelope, onClick = {
+                                                envelope = true; prefs.edit().putBoolean("eq_envelope", true).apply()
+                                                updateGlobalMultiBand(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                            }, label = { Text("부드러운 보간") })
+                                        }
+                                        Text("부드러운 보간은 밴드 게인 스파이크를 완화합니다. Poweramp 엔벨로프와 동일한 필터는 아닙니다.", color = Color.Gray, fontSize = 11.sp)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("자동 헤드룸 (양의 EQ 게인)", color = Ink, modifier = Modifier.weight(1f))
+                                            Switch(checked = headroom, onCheckedChange = {
+                                                headroom = it; prefs.edit().putBoolean("eq_headroom", it).apply()
+                                                updateGlobalMultiBand(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
+                                            })
+                                        }
+                                    }
                                 } }
                                 itemsIndexed(displayFrequencies) { i, hz ->
                                     Section("${hz} Hz") {
@@ -285,12 +345,18 @@ class MainActivity : ComponentActivity() {
                                     Text("기본 DSP에서는 기기 밴드에 근사 적용됩니다. 자체 DSP는 피킹 필터로 적용되므로 응답 곡선이 완전히 같지는 않습니다.", color = Color.Gray, fontSize = 11.sp)
                                 } }
                                 item { InfoCard("음량 펌핑 방지를 위해 저음 강화·서라운드·라우드니스는 시작 시 모두 OFF입니다. 추가 효과는 신호 피크를 증가시킬 수 있으므로 필요한 경우에만 활성화하세요. 이 버전에는 피크 기반 자동 헤드룸 보정이 없습니다.", "음질 우선 · 안전 기본값") }
-                                item { Section("저음 강화") { EffectSlider(bass, 0f..1f, { bass = it; engine.setBass(it); prefs.edit().putFloat("bass", it).apply() }, connected && on, "${(bass * 100).toInt()}%") } }
-                                item { Section("가상 서라운드") { EffectSlider(space, 0f..1f, { space = it; engine.setSpatial(it); prefs.edit().putFloat("space", it).apply() }, connected && on, "${(space * 100).toInt()}%") } }
+                                item { Section("저음 강화") { EffectSlider(bass, 0f..1f, { bass = it; engine.setBass(it); prefs.edit().putFloat("bass", it).apply() }, connected && on && !useMultiBand, "${(bass * 100).toInt()}%") } }
+                                item { Section("가상 서라운드") { EffectSlider(space, 0f..1f, { space = it; engine.setSpatial(it); prefs.edit().putFloat("space", it).apply() }, connected && on && !useMultiBand, "${(space * 100).toInt()}%") } }
                                 item { Section("Infinity Spatial Audio · 자체 DSP") {
                                     Text("중앙 보컬을 유지하도록 설계한 정적 Mid/Side 스테레오 폭 조절입니다. 추가 지연 버퍼·AGC·리미터가 없습니다. 현재는 앱 내부 테스트 PCM에만 적용됩니다.", color = Color.LightGray, fontSize = 12.sp)
-                                    Text("확장 강도 ${(nativeWidth * 100).toInt()}%", color = Ink)
-                                    Slider(nativeWidth, { nativeWidth = it; prefs.edit().putFloat("native_width", it).apply() }, valueRange = 0f..0.5f)
+                                    Text("자체 Mid/Side 폭 조절은 앱 내부 테스트 음원 전용입니다.", color = Color.LightGray, fontSize = 12.sp)
+                                    Text("내부 테스트 확장 ${(nativeWidth * 100).toInt()}%", color = Ink)
+                                    Slider(nativeWidth, { nativeWidth = it; prefs.edit().putFloat("native_width", it).apply() }, valueRange = 0f..0.5f, enabled = false)
+                                    Text("멜론 등 외부 앱: Android Virtualizer 호환 모드", color = Ink)
+                                    Text(spatialStatus, color = Color.LightGray, fontSize = 12.sp)
+                                    Text("강도 ${(spatialStrength * 100).toInt()}%", color = Ink)
+                                    Slider(spatialStrength, { spatialStrength = it; prefs.edit().putFloat("spatial_strength", it).apply(); applyExternalSpatial() }, valueRange = 0f..1f, enabled = spatialAvailable && on)
+                                    OutlinedButton(onClick = { applyExternalSpatial() }) { Text("기기 가상화 지원 확인") }
                                     Text("스테레오 확장은 위상/공간 문제의 근본 해결책이 아닙니다. 모노 호환성과 보컬 위치를 비교하세요.", color = Color.Gray, fontSize = 11.sp)
                                 } }
                                 item { Section("Dolby Atmos · 기기 연동") {
@@ -300,7 +366,7 @@ class MainActivity : ComponentActivity() {
                                     OutlinedButton(onClick = { if (!DolbyCompatibility.openSystemAudioSettings(this@MainActivity)) dolbyReport = "시스템 소리 설정을 열 수 없습니다." }, modifier = Modifier.fillMaxWidth()) { Text("시스템 소리 설정 열기") }
                                     Text("기기에서 Dolby가 활성화되어도 EQ와 동시에 처리되는지, 순서가 무엇인지는 보장할 수 없습니다.", color = Color.Gray, fontSize = 11.sp)
                                 } }
-                                item { Section("라우드니스 강화") { EffectSlider(loud, 0f..12f, { loud = it; engine.setLoudness(it); prefs.edit().putFloat("loud", it).apply() }, connected && on, "%.1f dB".format(loud)) } }
+                                item { Section("라우드니스 강화") { EffectSlider(loud, 0f..12f, { loud = it; engine.setLoudness(it); prefs.edit().putFloat("loud", it).apply() }, connected && on && !useMultiBand, "%.1f dB".format(loud)) } }
                                 item { InfoCard("컴프레서, 리미터, 파라메트릭 EQ는 Android 표준 AudioEffect만으로 범용 구현할 수 없어 이 빌드에 포함되지 않습니다.", "지원 범위") }
                             }
                             3 -> {
@@ -389,7 +455,7 @@ class MainActivity : ComponentActivity() {
                                 item { Section("주요 사용 앱 · 호환성 안내") {
                                     Text("YouTube, 삼성 인터넷/Chrome 등 브라우저, 멜론, Spotify, 벅스, 지니, 비디오 플레이어", color = Ink)
                                     Text("기본 DSP: 해당 앱의 접근 가능한 Audio Session에만 적용될 수 있습니다. 세션 0으로 전체 앱 적용은 보장되지 않습니다.", color = Color.LightGray, fontSize = 12.sp)
-                                    Text("자체 DSP: 현재는 앱 내부 테스트 PCM에만 적용됩니다. 다른 앱 오디오를 임의로 가로채거나 재출력하지 않습니다.", color = Color.LightGray, fontSize = 12.sp)
+                                    Text("자체 C++ DSP는 내부 테스트 전용입니다. 외부 앱은 Android DynamicsProcessing/Virtualizer 호환 경로를 사용하며 출력 적용은 기기별로 다릅니다.", color = Color.LightGray, fontSize = 12.sp)
                                     Text("브라우저·동영상·스트리밍 앱의 DRM, 오프로드, 독점 출력 경로는 기기별로 적용되지 않을 수 있습니다.", color = Color.LightGray, fontSize = 12.sp)
                                 } }
                                 item { Section("글로벌 믹스 EQ · 실험적") {
@@ -411,6 +477,11 @@ class MainActivity : ComponentActivity() {
                                         if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                         globalStatus = prefs.getString("global_mix_status", "미시도") ?: "미시도"
                                     }) { Text("글로벌 상태 새로고침") }
+                                } }
+                                item { Section("미지원 · 외부 앱에 실제 적용 불가") {
+                                    Text("DVC 직접 볼륨 제어: 공개 Android API로 Poweramp DVC와 동등한 외부 앱 출력 제어를 보장할 수 없어 비활성", color = Color.Gray, fontSize = 12.sp)
+                                    Text("AutoEq 자동 추천/가져오기: 장치 데이터 및 파일 파서 미구현으로 비활성", color = Color.Gray, fontSize = 12.sp)
+                                    Text("자체 C++ Spatial Audio: 멜론 PCM 직접 접근 불가로 비활성. 위 Android Virtualizer만 기기 지원 시 사용 가능", color = Color.Gray, fontSize = 12.sp)
                                 } }
                                 item { Section("외부 앱 EQ · 자동 세션 추적 (실험적)") {
                                     Text("멜론·YouTube·Spotify 등에서 공개 오디오 효과 세션 이벤트가 전달되면 세션별 Android EQ를 연결합니다. 이벤트를 보내지 않는 앱, 오프로드 및 일부 블루투스 경로는 적용되지 않을 수 있습니다.", color = Color.LightGray, fontSize = 12.sp)

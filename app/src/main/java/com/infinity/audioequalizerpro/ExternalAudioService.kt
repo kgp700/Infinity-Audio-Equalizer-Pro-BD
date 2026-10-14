@@ -29,7 +29,7 @@ class ExternalAudioService : Service() {
             val prefix = if (nativeMode()) "native_band" else "android_multi_band"
             val levels = NativeGraphicEq.frequencies(count).map { prefs.getFloat("${prefix}_${count}_$it", 0f) }
             val enabled = prefs.getBoolean("external_eq_enabled", true)
-            globalEq!!.apply(levels, enabled)
+            globalEq!!.apply(levels, enabled, prefs.getBoolean("eq_envelope", false), prefs.getBoolean("eq_headroom", true))
             prefs.edit().putString("global_mix_status", "세션 0 · ${count}밴드 · ${if (enabled) "활성 요청" else "꺼짐"} (음향 미검증)").apply()
         } catch (e: Exception) {
             globalEq?.release(); globalEq = null; globalCount = -1
@@ -64,12 +64,15 @@ class ExternalAudioService : Service() {
         val count = multiCount()
         val old = multiBand[id]
         if (old != null && old.bandCount != count) { old.release(); multiBand.remove(id) }
-        val eq = multiBand[id] ?: ExternalMultiBandEq(id, count).also { multiBand[id] = it }
+        val eq = try { multiBand[id] ?: ExternalMultiBandEq(id, count).also { multiBand[id] = it } } catch (e: Exception) {
+            prefs.edit().putString("multiband_status", "세션 $id: 엔진 생성 실패: ${e.message}").apply()
+            return
+        }
         val freqs = NativeGraphicEq.frequencies(count)
         val prefix = if (nativeMode()) "native_band" else "android_multi_band"
         val gains = freqs.map { prefs.getFloat("${prefix}_${count}_$it", 0f) }
         try {
-            eq.apply(gains, prefs.getBoolean("external_eq_enabled", true))
+            eq.apply(gains, prefs.getBoolean("external_eq_enabled", true), prefs.getBoolean("eq_envelope", false), prefs.getBoolean("eq_headroom", true))
             prefs.edit().putString("last_session_error", "").putInt("last_detected_session", id).putString("multiband_status", "세션 $id: ${count}밴드 설정 전달됨 (실제 음향 효과는 청음 확인 필요)").apply()
         } catch (e: Exception) {
             multiBand.remove(id)?.release()
