@@ -54,10 +54,10 @@ class MainActivity : ComponentActivity() {
             }
             val isNative = engineMode == EngineMode.NATIVE
             val displayFrequencies = if (isNative) nativeFrequencies else engine.frequencies
-            val displayGains = if (isNative) nativeGains else gains
             var connected by remember { mutableStateOf(false) }
             var tracking by remember { mutableStateOf(prefs.getBoolean("external_tracking_requested", false)) }
             var gains by remember { mutableStateOf(emptyList<Float>()) }
+            val displayGains = if (isNative) nativeGains else gains
             var avoidEnabled by remember { mutableStateOf(prefs.getBoolean("avoid_enabled", false)) }
             var avoidFreq by remember { mutableFloatStateOf(prefs.getFloat("avoid_freq", 10000f)) }
             var avoidStartText by remember { mutableStateOf(prefs.getInt("avoid_start_hz", 8000).toString()) }
