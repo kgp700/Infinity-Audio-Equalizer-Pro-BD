@@ -11,13 +11,37 @@ import androidx.core.app.NotificationCompat
 /** Best-effort public audio-effect session broadcasts. Not a universal player tracker. */
 class ExternalAudioService : Service() {
     private val sessions = mutableMapOf<Int, AudioEngine>()
+    private val multiBand = mutableMapOf<Int, ExternalMultiBandEq>()
+    private fun nativeMode(): Boolean = prefs.getString("engine_mode", "ANDROID") == "NATIVE"
+    private fun bandCount(): Int = prefs.getInt("native_band_count", 10).takeIf { it in listOf(10, 15, 31) } ?: 10
+    private fun syncMultiBand(id: Int) {
+        if (!nativeMode()) {
+            multiBand.remove(id)?.release()
+            return
+        }
+        val count = bandCount()
+        val old = multiBand[id]
+        if (old != null && old.bandCount != count) { old.release(); multiBand.remove(id) }
+        val eq = multiBand[id] ?: ExternalMultiBandEq(id, count).also { multiBand[id] = it }
+        val freqs = NativeGraphicEq.frequencies(count)
+        val gains = freqs.map { prefs.getFloat("native_band_${count}_$it", 0f) }
+        try {
+            eq.apply(gains, prefs.getBoolean("external_eq_enabled", true))
+            prefs.edit().putString("last_session_error", "").putInt("last_detected_session", id).putString("multiband_status", "세션 $id: ${count}밴드 설정 전달됨 (실제 음향 효과는 청음 확인 필요)").apply()
+        } catch (e: Exception) {
+            multiBand.remove(id)?.release()
+            prefs.edit().putString("multiband_status", "세션 $id: 31밴드 엔진 오류: ${e.message}").apply()
+        }
+    }
     private val handler = Handler(Looper.getMainLooper())
     private var checkCount = 0
     private val watchdog = object : Runnable {
         override fun run() {
             if (sessions.isNotEmpty()) {
                 sessions.toMap().forEach { (id, engine) ->
-                    if (!verifyAndRepair(id, engine)) {
+                    if (nativeMode()) {
+                        syncMultiBand(id)
+                    } else if (!verifyAndRepair(id, engine)) {
                         prefs.edit().putString("last_session_error", "세션 $id 상태 확인 실패; 재생 앱을 다시 시작해 주세요").apply()
                     }
                 }
@@ -67,6 +91,11 @@ class ExternalAudioService : Service() {
     }
     private fun open(id: Int) {
         if (sessions.containsKey(id)) return
+        if (nativeMode()) {
+            sessions[id] = AudioEngine() // Session lifecycle marker; never enable legacy EQ simultaneously.
+            syncMultiBand(id)
+            return
+        }
         val engine = AudioEngine()
         if (!engine.attach(id)) {
             prefs.edit().putString("last_session_error", "세션 $id: ${engine.error}").apply()
@@ -84,7 +113,7 @@ class ExternalAudioService : Service() {
         sessions[id] = engine
         prefs.edit().putInt("last_detected_session", id).putString("last_session_error", "").apply()
     }
-    private fun close(id: Int) { sessions.remove(id)?.release() }
+    private fun close(id: Int) { sessions.remove(id)?.release(); multiBand.remove(id)?.release() }
 
     private fun desiredLevels(engine: AudioEngine): List<Float> {
         val base = engine.frequencies.map { prefs.getFloat("band_$it", 0f) }
@@ -120,7 +149,18 @@ class ExternalAudioService : Service() {
     }
 
     private fun refreshAll() {
-        sessions.toMap().forEach { (id, engine) -> verifyAndRepair(id, engine) }
+        sessions.toMap().forEach { (id, engine) ->
+            if (nativeMode()) {
+                engine.release()
+                syncMultiBand(id)
+            } else {
+                multiBand.remove(id)?.release()
+                if (engine.frequencies.isEmpty()) {
+                    sessions.remove(id)
+                    open(id)
+                } else verifyAndRepair(id, engine)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -133,6 +173,7 @@ class ExternalAudioService : Service() {
         unregisterReceiver(routeReceiver)
         unregisterReceiver(receiver)
         sessions.values.forEach { it.release() }; sessions.clear()
+        multiBand.values.forEach { it.release() }; multiBand.clear()
         prefs.edit().putBoolean("tracking_active", false).apply()
         super.onDestroy()
     }

@@ -141,19 +141,20 @@ class MainActivity : ComponentActivity() {
                         item { InfoCard(notice, if (connected) "DSP 연결됨" else "DSP 연결 안 됨") }
                         when (page) {
                             0 -> {
-                                item { Section("현재 오디오 엔진") { Text(if (isNative) "Infinity Native · ${nativeBandCount}밴드 (앱 내부 PCM 전용)" else "Android AudioEffect · ${engine.frequencies.size}밴드", color = Ink); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
+                                item { Section("현재 오디오 엔진") { Text(if (isNative) "Infinity Native · ${nativeBandCount}밴드 (외부 세션 DynamicsProcessing 실험)" else "Android AudioEffect · ${engine.frequencies.size}밴드", color = Ink); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
                                 item { Section("EQ 응답 미리보기") { EqGraph(displayFrequencies, displayGains); Text("시각화는 밴드 레벨 보간이며 실제 측정된 주파수 응답이 아닙니다.", fontSize = 11.sp, color = Color.Gray) } }
                                 item { Section("빠른 이동") { Button(onClick = { page = 1 }, modifier = Modifier.fillMaxWidth()) { Text("그래픽 이퀄라이저 열기") }; OutlinedButton(onClick = { page = 4 }, modifier = Modifier.fillMaxWidth()) { Text("오디오 세션 연결 설정") } } }
                             }
                             1 -> {
                                 item { Section("그래픽 이퀄라이저") {
-                                    Text(if (isNative) "자체 DSP: ${nativeBandCount}밴드 · 앱 내부 테스트 PCM에만 적용" else "기기에서 지원하는 실제 밴드: ${engine.frequencies.size}개", color = Ink)
+                                    Text(if (isNative) "외부 앱: ${nativeBandCount}밴드 시스템 DSP 실험 · 기기 호환성 확인 필요" else "기기에서 지원하는 실제 밴드: ${engine.frequencies.size}개", color = Ink)
                                     if (isNative) {
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             listOf(10, 15, 31).forEach { count ->
                                                 FilterChip(selected = nativeBandCount == count, onClick = {
                                                     nativeBandCount = count
                                                     prefs.edit().putInt("native_band_count", count).apply()
+                                                    if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                                 }, label = { Text("${count}밴드") })
                                             }
                                         }
@@ -168,6 +169,7 @@ class MainActivity : ComponentActivity() {
                                                 if (isNative) {
                                                     nativeGains = nativeGains.toMutableList().apply { this[i] = v }
                                                     prefs.edit().putFloat("native_band_${nativeBandCount}_$hz", v).apply()
+                                                    if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH"))
                                                 } else {
                                                     baseGains = baseGains.toMutableList().apply { this[i] = v }
                                                     applyPreference(baseGains)
@@ -292,11 +294,11 @@ class MainActivity : ComponentActivity() {
                                 item { Section("DSP 엔진 선택") {
                                     EngineMode.entries.forEach { mode ->
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            RadioButton(selected = engineMode == mode, onClick = { engineMode = mode; prefs.edit().putString("engine_mode", mode.name).apply() })
+                                            RadioButton(selected = engineMode == mode, onClick = { engineMode = mode; prefs.edit().putString("engine_mode", mode.name).apply(); if (tracking) startService(Intent(this@MainActivity, ExternalAudioService::class.java).setAction("REFRESH")) })
                                             Text(mode.title, color = Ink)
                                         }
                                     }
-                                    Text(if (engineMode == EngineMode.NATIVE) "자체 DSP는 현재 앱이 직접 생성한 PCM에만 적용됩니다. 타사 앱에는 기본 DSP가 필요합니다. 엔진 선택은 외부 앱의 오디오 경로를 변경하지 않습니다." else "Android AudioEffect는 지원되는 오디오 세션에만 연결됩니다.", color = Color.LightGray, fontSize = 12.sp)
+                                    Text(if (engineMode == EngineMode.NATIVE) "외부 앱 세션에 DynamicsProcessing 다중밴드 EQ를 연결합니다. C++ 자체 DSP와 다른 시스템 효과이며 기기 지원 여부에 따라 실패할 수 있습니다. 멜론 재생 중 31밴드 고음을 -12dB로 내려 검증하세요." else "Android AudioEffect는 지원되는 오디오 세션에만 연결됩니다.", color = Color.LightGray, fontSize = 12.sp)
                                 } }
                                 item { Section("성능 및 지연 설정") {
                                     PerformanceMode.entries.forEach { mode ->
