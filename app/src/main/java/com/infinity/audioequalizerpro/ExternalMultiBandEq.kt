@@ -42,7 +42,7 @@ class ExternalMultiBandEq(sessionId: Int, val bandCount: Int) {
             lastLevels = levels
         }
         if (lastHeadroom != attenuation) {
-            effect.setInputGainAllChannels(attenuation)
+            effect.setInputGainAllChannelsTo(attenuation)
             lastHeadroom = attenuation
         }
         if (lastEnabled != enabled) { effect.enabled = enabled; lastEnabled = enabled }
