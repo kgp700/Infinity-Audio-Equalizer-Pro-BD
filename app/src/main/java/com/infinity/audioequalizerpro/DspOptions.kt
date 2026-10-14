@@ -12,9 +12,31 @@ enum class PerformanceMode(val title: String, val frames: Int, val fade: Int) {
     STABLE("안정성 · 1024프레임", 1024, 1024)
 }
 
+object NativeGraphicEq {
+    fun frequencies(count: Int): List<Int> {
+        require(count in listOf(10, 15, 31))
+        return (0 until count).map { i ->
+            // Logarithmically spaced between 20Hz and 20kHz.
+            (20.0 * (1000.0).pow(i.toDouble() / (count - 1))).roundToInt()
+        }
+    }
+    fun filters(frequencies: List<Int>, gains: List<Float>): DoubleArray {
+        require(frequencies.size == gains.size && frequencies.size <= 31)
+        val result = ArrayList<Double>(frequencies.size * 3)
+        frequencies.zip(gains).forEach { (hz, db) ->
+            if (kotlin.math.abs(db) > 0.001f) {
+                result.add(hz.toDouble())
+                result.add(db.coerceIn(-12f, 12f).toDouble())
+                result.add(1.4) // Approximate graphic EQ overlap; not a measured response.
+            }
+        }
+        return result.toDoubleArray()
+    }
+}
+
 /** Only an app-owned test signal is rendered here; external playback remains on Android AudioEffect. */
 object DspPreview {
-    fun play(mode: PerformanceMode, frequency: Double, gainDb: Double, q: Double, preampDb: Double, avoidEnabled: Boolean, avoidHz: Double, avoidDb: Double, avoidWidth: Double, stereoWidth: Double, done: (String) -> Unit) {
+    fun play(mode: PerformanceMode, frequency: Double, gainDb: Double, q: Double, preampDb: Double, avoidEnabled: Boolean, avoidHz: Double, avoidDb: Double, avoidWidth: Double, stereoWidth: Double, graphicFrequencies: List<Int> = emptyList(), graphicGains: List<Float> = emptyList(), done: (String) -> Unit) {
         Thread {
             try {
                 val rate = 48000
@@ -27,9 +49,11 @@ object DspPreview {
                     .setBufferSizeInBytes(max(minBufferBytes, mode.frames * 2 * 4 * 4)).build()
                 try {
                     NativeDsp().use { dsp ->
-                        val filters = if (avoidEnabled && avoidDb > 0.0)
+                        val graphicFilters = NativeGraphicEq.filters(graphicFrequencies, graphicGains)
+                        val extraFilters = if (avoidEnabled && avoidDb > 0.0)
                             doubleArrayOf(frequency, gainDb, q, avoidHz, -avoidDb, DislikedBand.nativeBellQ(avoidWidth))
                             else doubleArrayOf(frequency, gainDb, q)
+                        val filters = graphicFilters + extraFilters
                         dsp.configure(rate, filters, preampDb, mode.fade)
                         dsp.setStereoWidth(stereoWidth)
                         track.play()

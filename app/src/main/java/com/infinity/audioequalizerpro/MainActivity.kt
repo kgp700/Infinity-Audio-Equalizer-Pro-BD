@@ -47,6 +47,14 @@ class MainActivity : ComponentActivity() {
             var nativeGain by remember { mutableFloatStateOf(0f) }
             var nativeQ by remember { mutableFloatStateOf(1f) }
             var nativePreamp by remember { mutableFloatStateOf(-6f) }
+            var nativeBandCount by remember { mutableIntStateOf(prefs.getInt("native_band_count", 10).takeIf { it in listOf(10, 15, 31) } ?: 10) }
+            val nativeFrequencies = remember(nativeBandCount) { NativeGraphicEq.frequencies(nativeBandCount) }
+            var nativeGains by remember(nativeBandCount) {
+                mutableStateOf(nativeFrequencies.map { prefs.getFloat("native_band_${nativeBandCount}_$it", 0f) })
+            }
+            val isNative = engineMode == EngineMode.NATIVE
+            val displayFrequencies = if (isNative) nativeFrequencies else engine.frequencies
+            val displayGains = if (isNative) nativeGains else gains
             var connected by remember { mutableStateOf(false) }
             var tracking by remember { mutableStateOf(prefs.getBoolean("external_tracking_requested", false)) }
             var gains by remember { mutableStateOf(emptyList<Float>()) }
@@ -133,22 +141,55 @@ class MainActivity : ComponentActivity() {
                         item { InfoCard(notice, if (connected) "DSP 연결됨" else "DSP 연결 안 됨") }
                         when (page) {
                             0 -> {
-                                item { Section("현재 오디오 엔진") { Text("Android AudioEffect · ${engine.frequencies.size}밴드", color = Ink); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
-                                item { Section("EQ 응답 미리보기") { EqGraph(engine.frequencies, gains); Text("시각화는 밴드 레벨 보간이며 실제 측정된 주파수 응답이 아닙니다.", fontSize = 11.sp, color = Color.Gray) } }
+                                item { Section("현재 오디오 엔진") { Text(if (isNative) "Infinity Native · ${nativeBandCount}밴드 (앱 내부 PCM 전용)" else "Android AudioEffect · ${engine.frequencies.size}밴드", color = Ink); Text("세션: ${engine.sessionId} / 상태: ${if (on && connected) "활성" else "비활성"}", color = Color.LightGray) } }
+                                item { Section("EQ 응답 미리보기") { EqGraph(displayFrequencies, displayGains); Text("시각화는 밴드 레벨 보간이며 실제 측정된 주파수 응답이 아닙니다.", fontSize = 11.sp, color = Color.Gray) } }
                                 item { Section("빠른 이동") { Button(onClick = { page = 1 }, modifier = Modifier.fillMaxWidth()) { Text("그래픽 이퀄라이저 열기") }; OutlinedButton(onClick = { page = 4 }, modifier = Modifier.fillMaxWidth()) { Text("오디오 세션 연결 설정") } } }
                             }
                             1 -> {
-                                item { Section("그래픽 이퀄라이저") { Text("기기에서 지원하는 실제 밴드: ${engine.frequencies.size}개", color = Ink); EqGraph(engine.frequencies, gains) } }
-                                itemsIndexed(engine.frequencies) { i, hz ->
+                                item { Section("그래픽 이퀄라이저") {
+                                    Text(if (isNative) "자체 DSP: ${nativeBandCount}밴드 · 앱 내부 테스트 PCM에만 적용" else "기기에서 지원하는 실제 밴드: ${engine.frequencies.size}개", color = Ink)
+                                    if (isNative) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            listOf(10, 15, 31).forEach { count ->
+                                                FilterChip(selected = nativeBandCount == count, onClick = {
+                                                    nativeBandCount = count
+                                                    prefs.edit().putInt("native_band_count", count).apply()
+                                                }, label = { Text("${count}밴드") })
+                                            }
+                                        }
+                                    }
+                                    EqGraph(displayFrequencies, displayGains)
+                                } }
+                                itemsIndexed(displayFrequencies) { i, hz ->
                                     Section("${hz} Hz") {
-                                        val value = gains.getOrElse(i) { 0f }
+                                        val value = displayGains.getOrElse(i) { 0f }
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Slider(value = value, onValueChange = { v -> baseGains = baseGains.toMutableList().apply { this[i] = v }; applyPreference(baseGains); prefs.edit().putFloat("band_$hz", v).apply() }, valueRange = engine.gainRange, enabled = connected && on, modifier = Modifier.weight(1f))
+                                            Slider(value = value, onValueChange = { v ->
+                                                if (isNative) {
+                                                    nativeGains = nativeGains.toMutableList().apply { this[i] = v }
+                                                    prefs.edit().putFloat("native_band_${nativeBandCount}_$hz", v).apply()
+                                                } else {
+                                                    baseGains = baseGains.toMutableList().apply { this[i] = v }
+                                                    applyPreference(baseGains)
+                                                    prefs.edit().putFloat("band_$hz", v).apply()
+                                                }
+                                            }, valueRange = if (isNative) -12f..12f else engine.gainRange, enabled = on && (isNative || connected), modifier = Modifier.weight(1f))
                                             Text("%+.1f dB".format(value), color = Ink, modifier = Modifier.width(88.dp), textAlign = TextAlign.End)
                                         }
                                     }
                                 }
-                                item { OutlinedButton(onClick = { baseGains = List(engine.frequencies.size) { 0f }; baseGains.indices.forEach { prefs.edit().putFloat("band_${engine.frequencies[it]}", 0f).apply() }; applyPreference(baseGains) }, modifier = Modifier.fillMaxWidth(), enabled = connected) { Text("EQ 초기화") } }
+                                item { OutlinedButton(onClick = {
+                                    if (isNative) {
+                                        nativeGains = List(nativeBandCount) { 0f }
+                                        val editor = prefs.edit()
+                                        nativeFrequencies.forEach { editor.putFloat("native_band_${nativeBandCount}_$it", 0f) }
+                                        editor.apply()
+                                    } else {
+                                        baseGains = List(engine.frequencies.size) { 0f }
+                                        baseGains.indices.forEach { prefs.edit().putFloat("band_${engine.frequencies[it]}", 0f).apply() }
+                                        applyPreference(baseGains)
+                                    }
+                                }, modifier = Modifier.fillMaxWidth(), enabled = isNative || connected) { Text("EQ 초기화") } }
                             }
                             2 -> {
                                 item { Section("비선호 주파수 자연 감쇠") {
@@ -267,7 +308,7 @@ class MainActivity : ComponentActivity() {
                                     Text("48kHz 기준 블록 길이: %.2f ms · 실제 전체 출력 지연은 기기/버퍼/블루투스에 따라 추가됩니다.".format(perfMode.frames * 1000.0 / 48000), color = Color.LightGray, fontSize = 12.sp)
                                 } }
                                 item { Section("자체 DSP 실동작 테스트 · 3초") {
-                                    Text("Peaking 필터 · 48kHz 스테레오 · 자동 리미터/컴프레서 없음", color = Color.LightGray, fontSize = 12.sp)
+                                    Text("선택된 자체 EQ 밴드 + Peaking 필터 · 48kHz 스테레오 · 자동 리미터/컴프레서 없음", color = Color.LightGray, fontSize = 12.sp)
                                     Text("주파수 ${nativeFreq.toInt()} Hz", color = Ink)
                                     Slider(nativeFreq, { nativeFreq = it }, valueRange = 100f..12000f)
                                     Text("Gain %.1f dB".format(nativeGain), color = Ink)
@@ -278,7 +319,7 @@ class MainActivity : ComponentActivity() {
                                     Slider(nativePreamp, { nativePreamp = it }, valueRange = -24f..0f)
                                     Button(onClick = {
                                         previewRunning = true
-                                        DspPreview.play(perfMode, nativeFreq.toDouble(), nativeGain.toDouble(), nativeQ.toDouble(), nativePreamp.toDouble(), avoidEnabled, avoidFreq.toDouble(), avoidDepth.toDouble(), avoidWidth.toDouble(), nativeWidth.toDouble()) { msg ->
+                                        DspPreview.play(perfMode, nativeFreq.toDouble(), nativeGain.toDouble(), nativeQ.toDouble(), nativePreamp.toDouble(), avoidEnabled, avoidFreq.toDouble(), avoidDepth.toDouble(), avoidWidth.toDouble(), nativeWidth.toDouble(), if (isNative) nativeFrequencies else emptyList(), if (isNative) nativeGains else emptyList()) { msg ->
                                             runOnUiThread { notice = msg; previewRunning = false }
                                         }
                                     }, enabled = !previewRunning, modifier = Modifier.fillMaxWidth()) { Text(if (previewRunning) "테스트 재생 중" else "자체 DSP 테스트 소리 재생") }
